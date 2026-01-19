@@ -1,0 +1,179 @@
+- name: Create Linux user and install Nginx (multi-region)
+  hosts: localhost
+  connection: local
+  become: true
+
+  vars:
+    # -------------------------
+    # USER CONFIG
+    # -------------------------
+    user_name: ubuntu
+    user_shell: /bin/bash
+    user_groups: sudo,docker
+    allow_passwordless_sudo: true
+
+    # -------------------------
+    # REGION CONFIG (NO ENV)
+    # -------------------------
+    # Default region if not passed via --extra-vars
+    aws_region: "{{ aws_region | default('ap-south-1') }}"
+
+    ec2_keypair_map:
+      ap-south-1: dev-classic-ap-south-1
+      us-east-1: dev-classic-us-east-1
+      us-east-2: dev-classic-us-east-2
+
+    ssh_key_name: "{{ ec2_keypair_map.get(aws_region) }}"
+
+    # -------------------------
+    # SSH KEY PATHS
+    # -------------------------
+    control_user_home: "{{ lookup('env', 'HOME') }}"
+    ssh_public_key_path: "{{ control_user_home }}/.ssh/{{ ssh_key_name }}.pub"
+    ssh_private_key_path: "{{ control_user_home }}/.ssh/{{ ssh_key_name }}"
+
+    target_ssh_dir: "/home/{{ user_name }}/.ssh"
+
+    # -------------------------
+    # APP CONFIG
+    # -------------------------
+    nginx_repo: git@github.com:danish0410/nginx-p81.git
+    nginx_root: /var/www/nginx-p81
+
+  tasks:
+    # -------------------------
+    # VALIDATION
+    # -------------------------
+    - name: Fail if region keypair not defined
+      ansible.builtin.fail:
+        msg: "No EC2 keypair mapped for region: {{ aws_region }}"
+      when: ssh_key_name is not defined or ssh_key_name | length == 0
+
+    - name: Validate SSH public key exists
+      ansible.builtin.stat:
+        path: "{{ ssh_public_key_path }}"
+      register: ssh_pub
+      become: false
+
+    - name: Fail if SSH public key missing
+      ansible.builtin.fail:
+        msg: "Missing SSH public key: {{ ssh_public_key_path }}"
+      when: not ssh_pub.stat.exists
+      become: false
+
+    # -------------------------
+    # USER + GROUP
+    # -------------------------
+    - name: Ensure groups exist
+      ansible.builtin.group:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ user_groups.split(',') }}"
+
+    - name: Create user
+      ansible.builtin.user:
+        name: "{{ user_name }}"
+        shell: "{{ user_shell }}"
+        groups: "{{ user_groups }}"
+        append: true
+        create_home: true
+        state: present
+
+    # -------------------------
+    # SSH SETUP
+    # -------------------------
+    - name: Create .ssh directory
+      ansible.builtin.file:
+        path: "{{ target_ssh_dir }}"
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: "0700"
+        state: directory
+
+    - name: Add authorized key
+      ansible.builtin.authorized_key:
+        user: "{{ user_name }}"
+        key: "{{ lookup('file', ssh_public_key_path) }}"
+        state: present
+
+    - name: Copy private key for Git access
+      ansible.builtin.copy:
+        src: "{{ ssh_private_key_path }}"
+        dest: "{{ target_ssh_dir }}/{{ ssh_key_name }}"
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: "0600"
+
+    # -------------------------
+    # SUDO
+    # -------------------------
+    - name: Enable passwordless sudo
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ user_name }}"
+        content: "{{ user_name }} ALL=(ALL) NOPASSWD:ALL\n"
+        owner: root
+        group: root
+        mode: "0440"
+      when: allow_passwordless_sudo
+
+    # -------------------------
+    # NGINX
+    # -------------------------
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: yes
+
+    - name: Ensure app directory exists
+      ansible.builtin.file:
+        path: "{{ nginx_root }}"
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: "0755"
+        state: directory
+
+    # -------------------------
+    # SSH FIX (known_hosts)
+    # -------------------------
+    - name: Add GitHub to known_hosts
+      ansible.builtin.known_hosts:
+        name: github.com
+        key: "{{ lookup('pipe', 'ssh-keyscan -t rsa github.com') }}"
+        path: "{{ target_ssh_dir }}/known_hosts"
+        state: present
+
+    - name: Clone or update Nginx repo
+      ansible.builtin.shell: |
+        if [ ! -d "{{ nginx_root }}/.git" ]; then
+          git clone "{{ nginx_repo }}" "{{ nginx_root }}"
+        else
+          cd "{{ nginx_root }}"
+          git fetch origin
+          git reset --hard origin/HEAD
+        fi
+      args:
+        executable: /bin/bash
+      environment:
+        HOME: "/home/{{ user_name }}"
+        GIT_SSH_COMMAND: "ssh -i {{ target_ssh_dir }}/{{ ssh_key_name }}"
+      become: true
+      become_user: "{{ user_name }}"
+
+    - name: Fix ownership
+      ansible.builtin.file:
+        path: "{{ nginx_root }}"
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        recurse: yes
+
+    - name: Start and enable Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Verify Nginx
+      ansible.builtin.command: curl -I http://localhost
+      register: nginx_test
+      failed_when: "'200 OK' not in nginx_test.stdout"
