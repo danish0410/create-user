@@ -13,25 +13,24 @@
     allow_passwordless_sudo: true
 
     # -------------------------
-    # REGION CONFIG (NO ENV)
+    # REGION CONFIG (LOCAL SAFE)
     # -------------------------
-    # Default region if not passed via --extra-vars
-    aws_region: "{{ aws_region | default('ap-south-1') }}"
+    # Override with: -e aws_region=us-east-1
+    aws_region: "ap-south-1"
 
     ec2_keypair_map:
       ap-south-1: dev-classic-ap-south-1
       us-east-1: dev-classic-us-east-1
       us-east-2: dev-classic-us-east-2
 
-    ssh_key_name: "{{ ec2_keypair_map.get(aws_region) }}"
+    ssh_key_name: "{{ ec2_keypair_map[aws_region] | default('') }}"
 
     # -------------------------
-    # SSH KEY PATHS
+    # SSH PATHS
     # -------------------------
     control_user_home: "{{ lookup('env', 'HOME') }}"
     ssh_public_key_path: "{{ control_user_home }}/.ssh/{{ ssh_key_name }}.pub"
     ssh_private_key_path: "{{ control_user_home }}/.ssh/{{ ssh_key_name }}"
-
     target_ssh_dir: "/home/{{ user_name }}/.ssh"
 
     # -------------------------
@@ -46,10 +45,10 @@
     # -------------------------
     - name: Fail if region keypair not defined
       ansible.builtin.fail:
-        msg: "No EC2 keypair mapped for region: {{ aws_region }}"
-      when: ssh_key_name is not defined or ssh_key_name | length == 0
+        msg: "No SSH keypair defined for region: {{ aws_region }}"
+      when: ssh_key_name == ""
 
-    - name: Validate SSH public key exists
+    - name: Validate SSH public key exists on control node
       ansible.builtin.stat:
         path: "{{ ssh_public_key_path }}"
       register: ssh_pub
@@ -128,45 +127,50 @@
     - name: Ensure app directory exists
       ansible.builtin.file:
         path: "{{ nginx_root }}"
+        state: directory
         owner: "{{ user_name }}"
         group: "{{ user_name }}"
         mode: "0755"
-        state: directory
 
     # -------------------------
-    # SSH FIX (known_hosts)
+    # SSH known_hosts FIX
     # -------------------------
     - name: Add GitHub to known_hosts
       ansible.builtin.known_hosts:
         name: github.com
-        key: "{{ lookup('pipe', 'ssh-keyscan -t rsa github.com') }}"
+        key: "{{ lookup('pipe', 'ssh-keyscan github.com') }}"
         path: "{{ target_ssh_dir }}/known_hosts"
         state: present
-
-    - name: Clone or update Nginx repo
-      ansible.builtin.shell: |
-        if [ ! -d "{{ nginx_root }}/.git" ]; then
-          git clone "{{ nginx_repo }}" "{{ nginx_root }}"
-        else
-          cd "{{ nginx_root }}"
-          git fetch origin
-          git reset --hard origin/HEAD
-        fi
-      args:
-        executable: /bin/bash
-      environment:
-        HOME: "/home/{{ user_name }}"
-        GIT_SSH_COMMAND: "ssh -i {{ target_ssh_dir }}/{{ ssh_key_name }}"
-      become: true
       become_user: "{{ user_name }}"
 
-    - name: Fix ownership
+    # -------------------------
+    # GIT CLONE (NO BECOME)
+    # -------------------------
+    - name: Clone or update Nginx repo
+      become: false
+      environment:
+        HOME: "/home/{{ user_name }}"
+        GIT_SSH_COMMAND: "ssh -i {{ target_ssh_dir }}/{{ ssh_key_name }} -o StrictHostKeyChecking=yes"
+      ansible.builtin.git:
+        repo: "{{ nginx_repo }}"
+        dest: "{{ nginx_root }}"
+        version: HEAD
+        force: yes
+
+    # -------------------------
+    # FIX PERMISSIONS (SEPARATE)
+    # -------------------------
+    - name: Set ownership
+      become: true
       ansible.builtin.file:
         path: "{{ nginx_root }}"
         owner: "{{ user_name }}"
         group: "{{ user_name }}"
-        recurse: yes
+        recurse: true
 
+    # -------------------------
+    # SERVICE
+    # -------------------------
     - name: Start and enable Nginx
       ansible.builtin.systemd:
         name: nginx
