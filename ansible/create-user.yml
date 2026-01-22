@@ -7,7 +7,7 @@
     # -------------------------
     # USER CONFIG
     # -------------------------
-    user_name: ubuntu
+    user_name: thanigai
     user_shell: /bin/bash
     user_groups: sudo,docker
     allow_passwordless_sudo: true
@@ -181,3 +181,14 @@
       ansible.builtin.command: curl -I http://localhost
       register: nginx_test
       failed_when: "'200 OK' not in nginx_test.stdout"
+
+    # -------------------------
+    # USER VALIDATION
+    # -------------------------
+    - name: Verify user exists
+      ansible.builtin.command: "id {{ user_name }}"
+      changed_when: false
+
+    - name: Verify group membership
+      ansible.builtin.command: "groups {{ user_name }}"
+      changed_when: false
