@@ -7,7 +7,7 @@
     # -------------------------
     # USER CONFIG
     # -------------------------
-    user_name: thanigai
+    user_name: ubuntu
     user_shell: /bin/bash
     user_groups: sudo,docker
     allow_passwordless_sudo: true
