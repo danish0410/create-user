@@ -20,6 +20,7 @@
 
     ec2_keypair_map:
       ap-south-1: dev-classic-ap-south-1
+      ap-south-2: dev-classic-ap-south-2
       us-east-1: dev-classic-us-east-1
       us-east-2: dev-classic-us-east-2
 
